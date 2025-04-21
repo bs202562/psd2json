@@ -5,8 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "npm run lint && mocha",
-    "lint": "eslint index.js && eslint ./test",
-    "lint-fix": "eslint index.js --fix && eslint ./test --fix"
+    "lint": "eslint index.js bin/cli.js && eslint ./test",
+    "lint-fix": "eslint index.js bin/cli.js --fix && eslint ./test --fix",
+    "cli": "node bin/cli.js",
+    "debug": "node bin/cli.js \"D:\\work\\new2025\\WebDev\\WhatCatWeb\\webroot\\design\\design.psd\" \"D:\\work\\new2025\\WebDev\\WhatCatWeb\\webroot\\design\\out\" --flatten --max-width=1920 --max-height=1080"
   },
   "repository": {
     "type": "git",
@@ -28,7 +30,8 @@
   ],
   "dependencies": {
     "mkdirp": "^0.5.1",
-    "psd": "^3.2.0"
+    "psd": "^3.2.0",
+    "sharp": "^0.34.1"
   },
   "devDependencies": {
     "eslint": "^6.7.1",
