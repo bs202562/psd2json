@@ -3,6 +3,7 @@ const path = require('path');
 const psd = require('psd');
 const mkdirp = require('mkdirp');
 const sharp = require('sharp'); // 使用sharp库进行图像处理
+const { createCanvas } = require('canvas'); // 使用canvas库创建空白图像
 
 /**
  * Output PSD layout to JSON
@@ -89,12 +90,14 @@ async function psd2json(psdFile, options = {}) {
     };
   }
 
-  // Helper function to resize and save image using Sharp
-  async function resizeAndSaveImage(sourceFilePath, outputFilePath, originalWidth, originalHeight) {
-    const { width, height } = calculateScaledDimensions(originalWidth, originalHeight);
+  // Helper function to crop image using Sharp
+  async function resizeAndSaveImage(sourceFilePath, outputFilePath, originalWidth, originalHeight, layerX, layerY) {
+    const maxWidth = maxResolution?.width || originalWidth;
+    const maxHeight = maxResolution?.height || originalHeight;
 
     try {
-      console.log(`Resizing image from ${sourceFilePath} to ${outputFilePath} (${width}x${height})`);
+      console.log(`Processing image from ${sourceFilePath} to ${outputFilePath}`);
+      console.log(`Layer position: (${layerX}, ${layerY}), size: ${originalWidth}x${originalHeight}`);
 
       // 确保输入文件存在
       if (!fs.existsSync(sourceFilePath)) {
@@ -107,20 +110,132 @@ async function psd2json(psdFile, options = {}) {
         mkdirp.sync(outputDir);
       }
 
-      // 使用Sharp库调整图像大小
+      // 获取图像元数据
+      const metadata = await sharp(sourceFilePath).metadata();
+      console.log(`Image metadata: ${metadata.width}x${metadata.height}`);
+
+      // 计算可视区域的范围（最大分辨率范围）
+      const visibleArea = {
+        left: 0,
+        top: 0,
+        right: maxWidth,
+        bottom: maxHeight
+      };
+
+      // 计算图层在可视区域中的范围
+      const layerArea = {
+        left: layerX,
+        top: layerY,
+        right: layerX + originalWidth,
+        bottom: layerY + originalHeight
+      };
+
+      // 计算图层与可视区域的交集（即需要裁剪的部分）
+      const intersection = {
+        left: Math.max(visibleArea.left, layerArea.left),
+        top: Math.max(visibleArea.top, layerArea.top),
+        right: Math.min(visibleArea.right, layerArea.right),
+        bottom: Math.min(visibleArea.bottom, layerArea.bottom)
+      };
+
+      // 检查是否有交集
+      if (intersection.left >= intersection.right || intersection.top >= intersection.bottom) {
+        console.log(`Layer is completely outside the visible area, nothing to crop`);
+        // 图层完全在可视区域外，返回一个1x1的透明图像
+        const emptyCanvas = createCanvas(1, 1);
+        const ctx = emptyCanvas.getContext('2d');
+        ctx.clearRect(0, 0, 1, 1);
+
+        // 创建一个空白图像
+        await sharp({
+          create: {
+            width: 1,
+            height: 1,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+          }
+        }).toFile(outputFilePath);
+
+        // 对于完全在可视区域外的图层，我们返回一个默认位置
+        // 如果图层在可视区域的左侧或上方，则将其放在可视区域的边缘
+        // 如果图层在可视区域的右侧或下方，则将其放在可视区域的边缘
+        const newX = layerX < 0 ? 0 : (layerX > visibleArea.right ? visibleArea.right - 1 : layerX);
+        const newY = layerY < 0 ? 0 : (layerY > visibleArea.bottom ? visibleArea.bottom - 1 : layerY);
+
+        return { width: 1, height: 1, x: newX, y: newY };
+      }
+
+      // 计算交集区域的宽度和高度
+      const intersectionWidth = intersection.right - intersection.left;
+      const intersectionHeight = intersection.bottom - intersection.top;
+
+      // 计算需要从原始图像中裁剪的区域
+      // 需要将交集区域的坐标转换为相对于图层的坐标
+      const cropArea = {
+        left: Math.max(0, intersection.left - layerArea.left),
+        top: Math.max(0, intersection.top - layerArea.top),
+        width: intersectionWidth,
+        height: intersectionHeight
+      };
+
+      console.log(`Cropping area: left=${cropArea.left}, top=${cropArea.top}, width=${cropArea.width}, height=${cropArea.height}`);
+
+      // 确保裁剪区域不超出图像边界
+      if (cropArea.left + cropArea.width > metadata.width) {
+        cropArea.width = metadata.width - cropArea.left;
+      }
+
+      if (cropArea.top + cropArea.height > metadata.height) {
+        cropArea.height = metadata.height - cropArea.top;
+      }
+
+      // 确保裁剪尺寸大于0
+      if (cropArea.width <= 0 || cropArea.height <= 0) {
+        console.log(`Invalid crop dimensions, creating empty image`);
+        // 创建一个空白图像
+        await sharp({
+          create: {
+            width: 1,
+            height: 1,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+          }
+        }).toFile(outputFilePath);
+
+        // 对于无效裁剪尺寸的情况，返回一个默认位置
+        const newX = Math.max(0, layerX);
+        const newY = Math.max(0, layerY);
+
+        return { width: 1, height: 1, x: newX, y: newY };
+      }
+
+      // 裁剪并保存图像
       await sharp(sourceFilePath)
-        .resize({
-          width: Math.floor(width),
-          height: Math.floor(height),
-          fit: 'fill' // 确保图像精确调整到指定尺寸
+        .extract({
+          left: cropArea.left,
+          top: cropArea.top,
+          width: cropArea.width,
+          height: cropArea.height
         })
         .toFile(outputFilePath);
 
-      console.log(`Successfully resized image to: ${outputFilePath}`);
-      return { width, height };
+      // 计算裁剪后图像的新位置
+      // 如果图层的左上角在可视区域外，新位置应该是可视区域的边界
+      const newX = Math.max(0, layerX);
+      const newY = Math.max(0, layerY);
+
+      console.log(`Successfully cropped image to: ${outputFilePath} (${cropArea.width}x${cropArea.height})`);
+      console.log(`New position: (${newX}, ${newY})`);
+
+      return {
+        width: cropArea.width,
+        height: cropArea.height,
+        x: newX,
+        y: newY
+      };
     } catch (error) {
-      console.error(`Error during image resizing: ${error.message}`);
-      console.error(`Target dimensions: ${width}x${height}`);
+      console.error(`Error during image processing: ${error.message}`);
+      console.error(`Target max dimensions: ${maxWidth}x${maxHeight}`);
       throw error;
     }
   }
@@ -275,7 +390,7 @@ async function psd2json(psdFile, options = {}) {
               const needsResize = width !== dimensions.width || height !== dimensions.height;
 
               if (needsResize && maxResolution) {
-                console.log(`Smart object "${node.name}" needs resizing from ${dimensions.width}x${dimensions.height} to ${width}x${height}`);
+                console.log(`Smart object "${node.name}" needs processing (max dimensions: ${maxResolution.width}x${maxResolution.height})`);
 
                 try {
                   // 先保存原始图像，然后使用resizeAndSaveImage调整大小
@@ -310,7 +425,9 @@ async function psd2json(psdFile, options = {}) {
                     tempFilePath, // 传入临时文件路径而不是图像对象
                     outputPath,
                     dimensions.width,
-                    dimensions.height
+                    dimensions.height,
+                    dimensions.x,
+                    dimensions.y
                   );
 
                   // 删除临时文件
@@ -326,9 +443,17 @@ async function psd2json(psdFile, options = {}) {
                   // 更新结构中的尺寸信息
                   structure.width = result.width;
                   structure.height = result.height;
-                  console.log(`Successfully resized smart object "${node.name}" to ${result.width}x${result.height}`);
+
+                  // 如果返回了新的位置信息，更新图层位置
+                  if (result.x !== undefined && result.y !== undefined) {
+                    structure.x = result.x;
+                    structure.y = result.y;
+                    console.log(`Updated position to (${result.x}, ${result.y})`);
+                  }
+
+                  console.log(`Successfully processed smart object "${node.name}" to ${result.width}x${result.height}`);
                 } catch (error) {
-                  console.error(`Failed to resize smart object "${node.name}": ${error.message}`);
+                  console.error(`Failed to process smart object "${node.name}": ${error.message}`);
                   console.log(`Falling back to original image for smart object "${node.name}"`);
 
                   try {
@@ -384,7 +509,7 @@ async function psd2json(psdFile, options = {}) {
                   const tempFileName = `temp_${Date.now()}_${path.basename(outputPath)}`;
                   const tempFilePath = path.join(path.dirname(outputPath), tempFileName);
 
-                  console.log(`Attempting to resize image ${outputPath} from ${dimensions.width}x${dimensions.height} to ${width}x${height}`);
+                  console.log(`Processing image ${outputPath} (max dimensions: ${maxResolution.width}x${maxResolution.height})`);
 
                   // 保存原始图像到临时文件
                   if (exportImage.saveAsPng) {
@@ -400,14 +525,26 @@ async function psd2json(psdFile, options = {}) {
                     throw new Error(`Failed to create temporary file: ${tempFilePath}`);
                   }
 
-                  // 使用Sharp库调整图像大小
-                  await sharp(tempFilePath)
-                    .resize({
-                      width: Math.floor(width),
-                      height: Math.floor(height),
-                      fit: 'fill' // 确保图像精确调整到指定尺寸
-                    })
-                    .toFile(outputPath);
+                  // 使用resizeAndSaveImage函数裁剪图像
+                  const result = await resizeAndSaveImage(
+                    tempFilePath,
+                    outputPath,
+                    dimensions.width,
+                    dimensions.height,
+                    dimensions.x,
+                    dimensions.y
+                  );
+
+                  // 更新结构中的尺寸信息
+                  structure.width = result.width;
+                  structure.height = result.height;
+
+                  // 如果返回了新的位置信息，更新图层位置
+                  if (result.x !== undefined && result.y !== undefined) {
+                    structure.x = result.x;
+                    structure.y = result.y;
+                    console.log(`Updated position to (${result.x}, ${result.y})`);
+                  }
 
                   // 删除临时文件
                   try {
@@ -418,11 +555,9 @@ async function psd2json(psdFile, options = {}) {
                     console.warn(`Warning: Could not delete temporary file: ${tempFilePath}`);
                   }
 
-                  console.log(`Successfully resized and saved image: ${outputPath}`);
+                  console.log(`Successfully processed and saved image: ${outputPath}`);
 
-                  // 更新结构中的尺寸信息
-                  structure.width = width;
-                  structure.height = height;
+                  // 尺寸信息已在上面更新
                 } else {
                   // 不需要调整大小，直接保存原始图像
                   if (exportImage.saveAsPng) {
