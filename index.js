@@ -3,7 +3,6 @@ const path = require('path');
 const psd = require('psd');
 const mkdirp = require('mkdirp');
 const sharp = require('sharp'); // 使用sharp库进行图像处理
-const { createCanvas } = require('canvas'); // 使用canvas库创建空白图像
 
 /**
  * Output PSD layout to JSON
@@ -142,9 +141,6 @@ async function psd2json(psdFile, options = {}) {
       if (intersection.left >= intersection.right || intersection.top >= intersection.bottom) {
         console.log(`Layer is completely outside the visible area, nothing to crop`);
         // 图层完全在可视区域外，返回一个1x1的透明图像
-        const emptyCanvas = createCanvas(1, 1);
-        const ctx = emptyCanvas.getContext('2d');
-        ctx.clearRect(0, 0, 1, 1);
 
         // 创建一个空白图像
         await sharp({
@@ -249,6 +245,7 @@ async function psd2json(psdFile, options = {}) {
   const queueNodesIndex = [];
   const queueNodesName = [];
   const queueNodesStructure = [];
+  const queueParentOffsets = []; // 新增：用于存储父组的坐标偏移
 
   // 兼容不同版本的psd.js库
   const children = rootNode._children || rootNode.children || [];
@@ -256,9 +253,10 @@ async function psd2json(psdFile, options = {}) {
   queueNodesIndex.push(0);
   queueNodesName.push(undefined);
   const psdStructure = {
-    'group' : []
+    'children' : []
   };
   queueNodesStructure.push(psdStructure);
+  queueParentOffsets.push({ x: 0, y: 0 }); // 新增：根节点的偏移为(0,0)
 
   // Helper function to get masked dimensions
   function getMaskedDimensions(node) {
@@ -303,6 +301,7 @@ async function psd2json(psdFile, options = {}) {
     const queueIndex = queueNodes.length - 1;
     const nodes = queueNodes[queueIndex];
     const nodesStructure = queueNodesStructure[queueIndex];
+    const parentOffset = queueParentOffsets[queueIndex]; // 新增：获取当前父组的偏移
     let nodesIndex = queueNodesIndex[queueIndex];
     let nodesName = queueNodesName[queueIndex];
 
@@ -317,6 +316,8 @@ async function psd2json(psdFile, options = {}) {
       nodesIndex++;
       if (node.layer.visible === false) continue;
 
+      const dimensions = getMaskedDimensions(node);
+
       if (node.type === 'group') {
         queueNodes.push(node._children || node.children || []);
         queueNodesIndex[queueIndex] = nodesIndex;
@@ -325,33 +326,48 @@ async function psd2json(psdFile, options = {}) {
         const structure = {
           'name' : node.name,
           'type' : 'group',
-          'group' : []
+          'x': dimensions.x - parentOffset.x, // 修改：计算相对坐标
+          'y': dimensions.y - parentOffset.y, // 修改：计算相对坐标
+          'width': dimensions.width,
+          'height': dimensions.height,
+          'children' : [] // 修改：使用 children 替代 group
         };
-        nodesStructure.group.push(structure);
+        nodesStructure.children.push(structure);
         queueNodesStructure.push(structure);
+        queueParentOffsets.push({ x: dimensions.x, y: dimensions.y }); // 新增：推入当前组的绝对坐标作为子节点的偏移
         continue queueLoop;
       } else {
-        const isTextLayer = node.layer.text != null;
-        const dimensions = getMaskedDimensions(node);
+        const isTextLayer = typeof node.layer.typeTool === 'function';
 
         const structure = {
           'name' : node.name,
           'type' : isTextLayer ? 'text' : 'image',
-          'x' : dimensions.x,
-          'y' : dimensions.y,
+          'x' : dimensions.x - parentOffset.x,
+          'y' : dimensions.y - parentOffset.y,
           'width' : dimensions.width,
           'height' : dimensions.height
         };
 
         if (isTextLayer) {
-          const textInfo = node.layer.text;
+          const textInfo = node.layer.typeTool();
+          const textData = textInfo.obj?.textData || {};
+          const style = textData.StyleRun?.RunArray?.[0]?.StyleSheet?.StyleSheetData || {};
+          const fontInfo = style.Font || {};
+          const colorArray = style.FillColor?.Values?.slice(1) || [0, 0, 0, 1];
+
+          const fonts = textInfo.fonts();
+          const sizes = textInfo.sizes();
+          const colors = textInfo.colors();
+          const textColor = colors[0];
+          const cssColor = `rgba(${textColor[0]}, ${textColor[1]}, ${textColor[2]}, ${textColor[3]})`;
+
           structure.text = {
-            'content': textInfo.value || '',
-            'font': textInfo.font?.name || '',
-            'size': textInfo.font?.sizes?.[0] || 0,
-            'color': textInfo.font?.colors?.[0] || '',
-            'alignment': textInfo.font?.alignment?.[0] || '',
-            'transform': textInfo.transform || {}
+            'content': textInfo.obj?.textValue || '',
+            'font': fonts[0] || 'default',
+            'size': sizes[0] || 0,
+            'color': cssColor,
+            'alignment': textData.ParagraphRun?.RunArray?.[0]?.ParagraphSheet?.Properties?.Justification || 'left',
+            'transform': textInfo.obj?.transform || {}
           };
         } else if (outImgDir) {
           try {
@@ -581,7 +597,7 @@ async function psd2json(psdFile, options = {}) {
           }
         }
 
-        nodesStructure.group.push(structure);
+        nodesStructure.children.push(structure);
       }
     }
 
@@ -589,9 +605,10 @@ async function psd2json(psdFile, options = {}) {
     queueNodesIndex.pop();
     queueNodesName.pop();
     queueNodesStructure.pop();
+    queueParentOffsets.pop(); // 新增：当一个组处理完毕后，弹出其偏移
   }
 
-  const outJsonData = JSON.stringify(psdStructure.group, null, 2);
+  const outJsonData = JSON.stringify(psdStructure.children, null, 2);
 
   if (outJsonDir) {
     const outJsonDirPath = path.resolve(outJsonDir);
